@@ -30,6 +30,16 @@ class TetraDbOptions:
     tetra_max_angle: int = 20
     output: str = "tetra.dat"  # filename for db
 
+@dataclass
+class PyDbOptions:
+    #EXPERIMENTAL!
+    max_star: int = 5000
+    kv: bool = True
+    kv_min_distance: float = 0.2
+    kv_max_distance: float = 120.0
+    kv_distance_bins: int = 10000
+    output: str = "py.dat"  # filename for db
+
 
 @dataclass
 class PipelineOptions:
@@ -42,7 +52,7 @@ class PipelineOptions:
     # Exposure time (seconds)
     generate_exposure: float = 0.6
     generate_random_attitudes: bool = True
-    fov: float = 20
+    fov: float = 25
     # Pipeline parameters
     centroid_algo: str = "cog"
     database: str = "tetra.dat"
@@ -181,6 +191,36 @@ def generate_tetra_database(options: TetraDbOptions) -> bool:
         "--min-mag", str(options.min_mag),
         "--tetra",
         "--tetra-max-angle", str(options.tetra_max_angle),
+        "--output",
+        options.output,
+    ]
+    try:
+        result = subprocess.run(cmd, cwd=lost_dir, check=True)
+        if result.returncode != 0:
+            print(f"Database generation failed with return code {result.returncode}")
+            return False
+        return os.path.isfile(output_path)
+    except subprocess.CalledProcessError as e:
+        print(f"Database generation failed: {e}")
+        return False
+    except Exception as e:
+        print(f"Error: {e}")
+        return False
+
+def generate_py_database(options: PyDbOptions) -> bool:
+    """
+    Generate database for Pyramid star ID algorithm.
+    """
+    lost_dir = _get_lost_dir()
+    output_path = os.path.join(lost_dir, options.output)
+    cmd = [
+        "./lost",
+        "database",
+        "--max-stars", str(options.max_star),
+        "--kvector", str(options.kv).lower(),
+        "--kvector-min-distance", str(options.kv_min_distance),
+        "--kvector-max-distance", str(options.kv_max_distance),
+        "--kvector-distance-bins", str(options.kv_distance_bins),
         "--output",
         options.output,
     ]
@@ -632,3 +672,31 @@ def _get_lost_dir() -> str:
             f"LOST directory not found at expected location: {lost_dir}"
         )
     return lost_dir
+
+# Experimentals
+
+#This accuracy check is as simple as it get
+def simple_accuracy_check(AttitudeResult: AttitudeResult, tolerance_deg: float = 0.05, ra: float = None, de: float = None, roll: float = None) -> bool:
+    if not AttitudeResult.known:
+        return False
+    if any(v is None for v in [AttitudeResult.ra, AttitudeResult.de, AttitudeResult.roll]):
+        return False
+    if ra is None or de is None or roll is None:
+        return False
+    ah = ra+tolerance_deg
+    al = ra-tolerance_deg
+    dh = de+tolerance_deg
+    dl = de-tolerance_deg
+    rh = roll+tolerance_deg
+    rl = roll-tolerance_deg
+    if not (al <= AttitudeResult.ra <= ah):
+        if not (al <= AttitudeResult.ra + 360 <= ah):
+            if not (al <= AttitudeResult.ra - 360 <= ah):
+                return False
+    if not (dl <= AttitudeResult.de <= dh):
+        return False
+    if not (rl <= AttitudeResult.roll <= rh):
+        if not (rl <= AttitudeResult.roll + 360 <= rh):
+            if not (rl <= AttitudeResult.roll - 360 <= rh):
+                return False
+    return True

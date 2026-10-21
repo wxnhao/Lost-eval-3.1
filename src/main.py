@@ -1,7 +1,9 @@
 import inspect
+import math
 import sys
+import time
 
-from lost_api import CompileOptions, CentroidResult, StarIDResult
+from lost_api import CompileOptions, CentroidResult, StarIDResult, run_entire_pipeline
 from scipy.spatial import KDTree
 
 def test_compile_lost():
@@ -24,6 +26,13 @@ def test_generate_tetra_database():
     options = TetraDbOptions(min_mag=7, tetra_max_angle=20, output="tetra-20.dat")
     generate_tetra_database(options)
 
+def test_generate_py_database():
+    from lost_api import generate_py_database, PyDbOptions
+
+    # NOTE: change this to match your image FOV
+    options = PyDbOptions(output="py.dat")
+    generate_py_database(options)
+
 
 def test_run_entire_pipeline_random_attitude():
     from lost_api import parse_attitude_result, PipelineOptions, run_entire_pipeline
@@ -33,7 +42,7 @@ def test_run_entire_pipeline_random_attitude():
         generate=1,
         generate_random_attitudes=True,
         generate_exposure=1,
-        fov=25,
+        fov=20,
         centroid_algo="cog",
         database="tetra-20.dat",
         false_stars=0,
@@ -438,6 +447,877 @@ def test_ablation_study_resolutions(runs_per_res: str | int = 50, fov: float = 2
         'cross_boresight_accuracies': cross_boresight_accuracies,
         'around_boresight_accuracies': around_boresight_accuracies
     }
+# def latency_test(fov: str | int = 100, runs: str | int = 10):
+#     try:
+#         fov = float(fov)
+#         runs = int(runs)
+#     except Exception:
+#         raise ValueError("fovs and runs must be a float and an int")   
+#     from lost_api import run_entire_pipeline, parse_attitude_result, PipelineOptions, simple_accuracy_check
+#     import matplotlib.pyplot as plt 
+#     import os
+#     import math
+#     import re
+#     import random
+#     simple_tolerance_degrees = 0.01  # Tolerance for simple accuracy check
+#     c_algo = "cog"
+#     a_algo = "dqm"
+#     exposure_time = 0.6
+#     fstars_count = 0
+#     start_time = time.perf_counter()
+#     end_time = time.perf_counter()
+#     print(end_time - start_time)
+    
+
+def test_TetraVsPyramid1(runs_per_fov: str | int = 100):
+    """Run a simple accuracy benchmark comparing Tetra vs Pyramid star-id algorithms across multiple FOVs.
+
+    runs_per_fov: number of repeated pipeline runs to average for each FOV and star-id algorithm.
+    The function will write plots to the project root.
+    """
+    try:
+        runs = int(runs_per_fov)
+    except Exception:
+        raise ValueError("runs_per_fov must be an integer or convertible to int")
+    
+    from lost_api import run_entire_pipeline, parse_attitude_result, PipelineOptions, simple_accuracy_check
+    import matplotlib.pyplot as plt
+    import os
+    import math
+    import re
+    import random
+
+    # FOV values to sweep (degrees)
+    fovs = [5, 10, 15, 20, 25, 30, 35, 40, 45, 50, 55, 60, 65, 70, 75, 80, 85, 90]
+    simple_tolerance_degrees = 0.5  # Tolerance for simple accuracy check
+    c_algo = "cog"
+    a_algo = "dqm"
+    exposure_time = 0.6
+    fstars_count = 0
+    success_ratesT = []
+    FPrateT = []
+    latencyT = []
+    success_ratesP = []
+    FPrateP = []
+    latencyP = []
+    # cross_boresight_accuracies = []
+    # around_boresight_accuracies = []
+
+    # Store ALL run information for debugging
+    resultsT = []
+    resultsP = []
+
+    project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    lost_dir = os.path.join(project_root, "lost")
+
+    num_re = re.compile(r"[-+]?\d*\.?\d+(?:[eE][-+]?\d+)?")
+
+    def parse_points(file_obj):
+
+        points = []
+
+        current_x = None
+        current_y = None
+
+        for line in file_obj:
+
+            line = line.strip()
+
+            #
+            # Parse x
+            #
+            if "_x " in line:
+                try:
+                    current_x = float(line.split()[-1])
+                except:
+                    current_x = None
+
+            #
+            # Parse y
+            #
+            elif "_y " in line:
+                try:
+                    current_y = float(line.split()[-1])
+                except:
+                    current_y = None
+
+            #
+            # Once we have both x and y,
+            # append a point
+            #
+            if current_x is not None and current_y is not None:
+
+                points.append((current_x, current_y))
+
+                current_x = None
+                current_y = None
+
+        return points
+
+    for fov in fovs:
+        knowns_T = 0
+        successes_T = 0
+        false_positives_T = 0
+        centroid_errors_T = []
+        detected_stars_list_T = []
+        successruntimes_T = 0
+        failureruntimes_T = 0
+
+        knowns_P = 0
+        successes_P = 0
+        false_positives_P = 0
+        centroid_errors_P = []
+        detected_stars_list_P = []
+        successruntimes_P = 0
+        failureruntimes_P = 0
+
+        print("\n")
+        print("#" * 70)
+        print(f"STARTING FOV SWEEP: {fov} degrees")
+        print("#" * 70)
+
+        for i in range(runs):
+
+            print("\n" + "=" * 60)
+            print(f"STARTING RUN: FOV={fov} deg | run={i}")
+            print("=" * 60)
+
+            attitude_fname = f"attitude_fov{fov}_run{i}.txt"
+            centroid_fname = f"input_centroids_fov{fov}_run{i}.txt"
+            actual_centroid_fname = f"actual_centroids_fov{fov}_run{i}.txt"
+            compare_star_ids_fname = f"compare_star_ids_fov{fov}_run{i}.txt"
+
+            rra = random.uniform(0, 360)
+            # rde = random.uniform(-90, 90)
+            u = random.uniform(-1, 1)
+            rde = math.degrees(math.asin(u))
+            rroll = random.uniform(0, 360)
+            
+            Toptions = PipelineOptions(
+                generate=1,
+                generate_ra=rra,
+                generate_de=rde,
+                generate_roll=rroll,
+                generate_random_attitudes=False,
+                generate_exposure=exposure_time,
+                centroid_algo=c_algo,
+                database="tetra-20.dat",
+                false_stars=fstars_count,
+                star_id_algo="tetra",
+                attitude_algo=a_algo,
+                centroid_mag_filter=0,
+                print_attitude=attitude_fname,
+                print_input_centroids=centroid_fname,
+                print_actual_centroids=actual_centroid_fname,
+                compare_star_ids=compare_star_ids_fname,
+                fov_deg=float(fov),
+            )
+
+            Poptions = PipelineOptions(
+                generate=1,
+                generate_ra=rra,
+                generate_de=rde,
+                generate_roll=rroll,
+                generate_random_attitudes=False,
+                generate_exposure=exposure_time,
+                centroid_algo=c_algo,
+                database="py.dat",
+                false_stars=fstars_count,
+                star_id_algo="py",
+                attitude_algo=a_algo,
+                centroid_mag_filter=0,
+                print_attitude=attitude_fname,
+                print_input_centroids=centroid_fname,
+                print_actual_centroids=actual_centroid_fname,
+                compare_star_ids=compare_star_ids_fname,
+                fov_deg=float(fov),
+            )
+            start_time_T = time.perf_counter()
+            tetraOK = run_entire_pipeline(Toptions)
+            end_time_T = time.perf_counter()
+
+            if not tetraOK:
+                print(f"Pipeline run failed for FOV={fov} run={i}")
+
+                resultsT.append({
+                    "fov": fov,
+                    "run": i,
+                    "solution": False,
+                    "success": False,
+                    "pipeline_ok": False,
+                })
+                failureruntimes_T += (end_time_T - start_time_T)
+
+                continue
+            successruntimes_T += (end_time_T - start_time_T)
+            res_T = parse_attitude_result(attitude_fname)
+
+            solved_T = False
+            success_T = False
+            if res_T is None:
+                print(f"Could not parse attitude Tetra result for FOV={fov} run={i}")
+
+            elif res_T.known:
+                solved_T = True
+                knowns_T += 1
+                if simple_accuracy_check(res_T, simple_tolerance_degrees, rra, rde, rroll):
+                    success_T = True
+                    successes_T += 1
+                else:
+                    false_positives_T += 1
+            print(f"SOLVED: {solved_T}")
+            print(f"SUCCESS: {success_T}")
+
+            input_path = os.path.join(lost_dir, centroid_fname)
+            actual_path = os.path.join(lost_dir, actual_centroid_fname)
+
+            
+            #
+            # Store structured results
+            #
+            resultsT.append({
+                "fov": fov,
+                "run": i,
+                "solution": solved_T,
+                "success": success_T,
+                "pipeline_ok": True,
+            })
+            start_time_P = time.perf_counter()
+            pyramidOK = run_entire_pipeline(Poptions)
+            end_time_P = time.perf_counter()
+            if not pyramidOK:
+                print(f"Pipeline run failed for FOV={fov} run={i} PYRAMID")
+
+                resultsP.append({
+                    "fov": fov,
+                    "run": i,
+                    "solution": False,
+                    "success": False,
+                    "pipeline_ok": False,
+                })
+
+                failureruntimes_P += (end_time_P - start_time_P)
+                continue
+            successruntimes_P += (end_time_P - start_time_P)
+            res_P = parse_attitude_result(attitude_fname)
+
+            solved_P = False
+            success_P = False
+
+            if res_P is None:
+                print(f"Could not parse attitude Pyramid result for FOV={fov} run={i}")
+
+            elif res_P.known:
+                solved_P = True
+                knowns_P += 1
+                if simple_accuracy_check(res_P, simple_tolerance_degrees, rra, rde, rroll):
+                    success_P = True
+                    successes_P += 1
+                else:
+                    false_positives_P += 1
+            print(f"SOLVED: {solved_P}")
+            print(f"SUCCESS: {success_P}")
+
+            input_path = os.path.join(lost_dir, centroid_fname)
+            actual_path = os.path.join(lost_dir, actual_centroid_fname)
+
+            # avg_error = None
+            # count = None
+            # inp_pts = []
+            # act_pts = []
+
+            # #
+            # # Parse centroid files
+            # #
+            # try:
+            #     if os.path.isfile(input_path):
+            #         with open(input_path, "r") as fi:
+            #             inp_pts = parse_points(fi)
+
+            #     if os.path.isfile(actual_path):
+            #         with open(actual_path, "r") as fa:
+            #             act_pts = parse_points(fa)
+            #     print(f"input centroids detected: {len(inp_pts)}")
+            #     print(f"actual centroids visible: {len(act_pts)}")
+
+            # except Exception as e:
+            #     print(f"Error parsing centroid files: {e}")
+
+            # #
+            # # Compute centroid error
+            # #
+            # try:
+
+            #     if len(inp_pts) > 0 and len(act_pts) > 0:
+
+            #         errs = []
+
+            #         #
+            #         # Use nearest-neighbor matching
+            #         #
+                    
+
+            #         tree = KDTree(act_pts)
+
+            #         for p in inp_pts:
+            #             dist, idx = tree.query(p)
+            #             errs.append(dist)
+
+            #         if len(errs) > 0:
+            #             avg_error = sum(errs) / len(errs)
+
+            #             centroid_errors_T.append(avg_error)
+
+            #             print(f"average centroiding error: {avg_error:.4f} px")
+
+            # except Exception as e:
+            #     print(f"Error computing centroid accuracy: {e}")
+
+            # #
+            # # Count detected stars
+            # #
+            # try:
+            #     count = len(act_pts)
+
+            #     detected_stars_list_T.append(count)
+
+            #     print(f"detected stars: {count}")
+
+            # except Exception as e:
+            #     print(f"Error counting stars: {e}")
+
+            #
+            # Store structured results
+            #
+            resultsP.append({
+                "fov": fov,
+                "run": i,
+                "solution": solved_P,
+                "success": success_P,
+                "pipeline_ok": True,
+            }
+            )
+
+        #
+        # Aggregate FOV statistics
+        #
+        rateT = successes_T / runs if runs > 0 else 0.0
+        rateP = successes_P / runs if runs > 0 else 0.0
+        success_ratesT.append(rateT)
+        success_ratesP.append(rateP)
+        FPrateT.append(false_positives_T/knowns_T if knowns_T > 0 else 0.0)
+        FPrateP.append(false_positives_P/knowns_P if knowns_P > 0 else 0.0)
+        print("\n")
+        print("-" * 60)
+        print(f"FOV={fov} deg summary")
+        print(f"Tetra successes: {successes_T}/{runs}")
+        print(f"Tetra success rate: {rateT:.2%}")
+        print(f"Pyramid successes: {successes_P}/{runs}")
+        print(f"Pyramid success rate: {rateP:.2%}")
+        print(f"Tetra false positives: {false_positives_T}")
+        print(f"Pyramid false positives: {false_positives_P}")
+        print(f"Tetra knowns: {knowns_T}")
+        print(f"Pyramid knowns: {knowns_P}")
+
+        # if centroid_errors_P:
+        #     print(
+        #         f"average centroid error: "
+        #         f"{sum(centroid_errors_P)/len(centroid_errors_P):.4f} px"
+        #     )
+
+        # if detected_stars_list_P:
+        #     print(
+        #         f"average detected stars: "
+        #         f"{sum(detected_stars_list_P)/len(detected_stars_list_P):.2f}"
+        #     )
+
+        print("-" * 60)
+
+        #
+        # Placeholder values for plotting
+        #
+        # cross_boresight_accuracies.append(None)
+        # around_boresight_accuracies.append(None)
+
+    #
+    # FINAL STRUCTURED RESULTS
+    #
+    print("\n\n")
+    print("#" * 70)
+    print("FINAL RESULTS")
+    print("#" * 70)
+
+    for r in resultsP:
+        print(r)
+
+    #
+    # Plot success rate
+    #
+    plt.figure(figsize=(8, 5))
+
+    plt.plot(
+        fovs,
+        success_ratesT,
+        marker="o",
+        label="Tetra Success Rate"
+    )
+    plt.plot(
+        fovs,
+        success_ratesP,
+        marker="o",
+        label="Pyramid Success Rate"
+    )
+    plt.plot(
+        fovs,
+        FPrateT,
+        marker="x",
+        label="Tetra False Positives Rate"
+    )
+    plt.plot(
+        fovs,
+        FPrateP,
+        marker="x",
+        label="Pyramid False Positives Rate"
+    )
+
+    plt.title("Tetra vs Pyramid: Success Rate across FOV simple accuracy check")
+
+    plt.xlabel("FOV (degrees)")
+    plt.ylabel("Success rate")
+
+    plt.ylim(-0.05, 1.05)
+
+    plt.grid(True)
+    plt.legend()
+
+    out_path = os.path.join(project_root, "tetravspyramidVERYLOWTOLERANCE.png")
+
+    plt.savefig(out_path, bbox_inches="tight")
+
+    print(f"\nSaved success-rate plot to: {out_path}")
+
+def test_temp(runs_per_fov: str | int = 100):
+    """Run a simple accuracy benchmark comparing Tetra vs Pyramid star-id algorithms across multiple FOVs.
+
+    runs_per_fov: number of repeated pipeline runs to average for each FOV and star-id algorithm.
+    The function will write plots to the project root.
+    """
+    try:
+        runs = int(runs_per_fov)
+    except Exception:
+        raise ValueError("runs_per_fov must be an integer or convertible to int")
+    
+    from lost_api import run_entire_pipeline, parse_attitude_result, PipelineOptions, simple_accuracy_check
+    import matplotlib.pyplot as plt
+    import os
+    import math
+    import re
+    import random
+
+    # FOV values to sweep (degrees)
+    fovs = [5, 10, 15, 20, 25, 30, 35, 40, 45, 50, 55, 60, 65, 70, 75, 80, 85, 90]
+    simple_tolerance_degrees = 0.25  # Tolerance for simple accuracy check
+    c_algo = "cog"
+    s_algo = "tetra"
+    tdb = "tetra-20.dat"
+    pdb = "py.dat"
+    a_algo = "dqm"
+    exposure_time = 0.6
+    fstars_count = 0
+    success_ratesT = []
+    FPrateT = []
+    success_ratesP = []
+    FPrateP = []
+    # cross_boresight_accuracies = []
+    # around_boresight_accuracies = []
+
+    # Store ALL run information for debugging
+    resultsT = []
+    resultsP = []
+
+    project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    lost_dir = os.path.join(project_root, "lost")
+
+    num_re = re.compile(r"[-+]?\d*\.?\d+(?:[eE][-+]?\d+)?")
+
+    def parse_points(file_obj):
+
+        points = []
+
+        current_x = None
+        current_y = None
+
+        for line in file_obj:
+
+            line = line.strip()
+
+            #
+            # Parse x
+            #
+            if "_x " in line:
+                try:
+                    current_x = float(line.split()[-1])
+                except:
+                    current_x = None
+
+            #
+            # Parse y
+            #
+            elif "_y " in line:
+                try:
+                    current_y = float(line.split()[-1])
+                except:
+                    current_y = None
+
+            #
+            # Once we have both x and y,
+            # append a point
+            #
+            if current_x is not None and current_y is not None:
+
+                points.append((current_x, current_y))
+
+                current_x = None
+                current_y = None
+
+        return points
+
+    for fov in fovs:
+        knowns_T = 0
+        successes_T = 0
+        false_positives_T = 0
+        centroid_errors_T = []
+        detected_stars_list_T = []
+
+        knowns_P = 0
+        successes_P = 0
+        false_positives_P = 0
+        centroid_errors_P = []
+        detected_stars_list_P = []
+
+        print("\n")
+        print("#" * 70)
+        print(f"STARTING FOV SWEEP: {fov} degrees")
+        print("#" * 70)
+
+        for i in range(runs):
+
+            print("\n" + "=" * 60)
+            print(f"STARTING RUN: FOV={fov} deg | run={i}")
+            print("=" * 60)
+
+            attitude_fname = f"attitude_fov{fov}_run{i}.txt"
+            centroid_fname = f"input_centroids_fov{fov}_run{i}.txt"
+            actual_centroid_fname = f"actual_centroids_fov{fov}_run{i}.txt"
+            compare_star_ids_fname = f"compare_star_ids_fov{fov}_run{i}.txt"
+
+            rra = random.uniform(0, 360)
+            # rde = random.uniform(-90, 90)
+            u = random.uniform(-1, 1)
+            rde = math.degrees(math.asin(u))
+            rroll = random.uniform(0, 360)
+            
+            Toptions = PipelineOptions(
+                generate=1,
+                generate_ra=rra,
+                generate_de=rde,
+                generate_roll=rroll,
+                generate_random_attitudes=False,
+                generate_exposure=exposure_time,
+                centroid_algo=c_algo,
+                database=tdb,
+                false_stars=fstars_count,
+                star_id_algo=s_algo,
+                attitude_algo= "dqm",
+                centroid_mag_filter=0,
+                print_attitude=attitude_fname,
+                print_input_centroids=centroid_fname,
+                print_actual_centroids=actual_centroid_fname,
+                compare_star_ids=compare_star_ids_fname,
+                fov_deg=float(fov),
+            )
+
+            Poptions = PipelineOptions(
+                generate=1,
+                generate_ra=rra,
+                generate_de=rde,
+                generate_roll=rroll,
+                generate_random_attitudes=False,
+                generate_exposure=exposure_time,
+                centroid_algo=c_algo,
+                database=tdb,
+                false_stars=fstars_count,
+                star_id_algo=s_algo,
+                attitude_algo="triad",
+                centroid_mag_filter=0,
+                print_attitude=attitude_fname,
+                print_input_centroids=centroid_fname,
+                print_actual_centroids=actual_centroid_fname,
+                compare_star_ids=compare_star_ids_fname,
+                fov_deg=float(fov),
+            )
+
+            tetraOK = run_entire_pipeline(Toptions)
+
+            if not tetraOK:
+                print(f"Pipeline run failed for FOV={fov} run={i}")
+
+                resultsT.append({
+                    "fov": fov,
+                    "run": i,
+                    "solution": False,
+                    "success": False,
+                    "pipeline_ok": False,
+                })
+
+                continue
+
+            res_T = parse_attitude_result(attitude_fname)
+
+            solved_T = False
+            success_T = False
+            if res_T is None:
+                print(f"Could not parse attitude Tetra result for FOV={fov} run={i}")
+
+            elif res_T.known:
+                solved_T = True
+                knowns_T += 1
+                if simple_accuracy_check(res_T, simple_tolerance_degrees, rra, rde, rroll):
+                    success_T = True
+                    successes_T += 1
+                else:
+                    false_positives_T += 1
+            print(f"SOLVED: {solved_T}")
+            print(f"SUCCESS: {success_T}")
+
+            input_path = os.path.join(lost_dir, centroid_fname)
+            actual_path = os.path.join(lost_dir, actual_centroid_fname)
+
+            
+            #
+            # Store structured results
+            #
+            resultsT.append({
+                "fov": fov,
+                "run": i,
+                "solution": solved_T,
+                "success": success_T,
+                "pipeline_ok": True,
+            })
+
+            pyramidOK = run_entire_pipeline(Poptions)
+
+            if not pyramidOK:
+                print(f"Pipeline run failed for FOV={fov} run={i} PYRAMID")
+
+                resultsP.append({
+                    "fov": fov,
+                    "run": i,
+                    "solution": False,
+                    "success": False,
+                    "pipeline_ok": False,
+                })
+
+                continue
+
+            res_P = parse_attitude_result(attitude_fname)
+
+            solved_P = False
+            success_P = False
+
+            if res_P is None:
+                print(f"Could not parse attitude Pyramid result for FOV={fov} run={i}")
+
+            elif res_P.known:
+                solved_P = True
+                knowns_P += 1
+                if simple_accuracy_check(res_P, simple_tolerance_degrees, rra, rde, rroll):
+                    success_P = True
+                    successes_P += 1
+                else:
+                    false_positives_P += 1
+            print(f"SOLVED: {solved_P}")
+            print(f"SUCCESS: {success_P}")
+
+            input_path = os.path.join(lost_dir, centroid_fname)
+            actual_path = os.path.join(lost_dir, actual_centroid_fname)
+
+            # avg_error = None
+            # count = None
+            # inp_pts = []
+            # act_pts = []
+
+            # #
+            # # Parse centroid files
+            # #
+            # try:
+            #     if os.path.isfile(input_path):
+            #         with open(input_path, "r") as fi:
+            #             inp_pts = parse_points(fi)
+
+            #     if os.path.isfile(actual_path):
+            #         with open(actual_path, "r") as fa:
+            #             act_pts = parse_points(fa)
+            #     print(f"input centroids detected: {len(inp_pts)}")
+            #     print(f"actual centroids visible: {len(act_pts)}")
+
+            # except Exception as e:
+            #     print(f"Error parsing centroid files: {e}")
+
+            # #
+            # # Compute centroid error
+            # #
+            # try:
+
+            #     if len(inp_pts) > 0 and len(act_pts) > 0:
+
+            #         errs = []
+
+            #         #
+            #         # Use nearest-neighbor matching
+            #         #
+                    
+
+            #         tree = KDTree(act_pts)
+
+            #         for p in inp_pts:
+            #             dist, idx = tree.query(p)
+            #             errs.append(dist)
+
+            #         if len(errs) > 0:
+            #             avg_error = sum(errs) / len(errs)
+
+            #             centroid_errors_T.append(avg_error)
+
+            #             print(f"average centroiding error: {avg_error:.4f} px")
+
+            # except Exception as e:
+            #     print(f"Error computing centroid accuracy: {e}")
+
+            # #
+            # # Count detected stars
+            # #
+            # try:
+            #     count = len(act_pts)
+
+            #     detected_stars_list_T.append(count)
+
+            #     print(f"detected stars: {count}")
+
+            # except Exception as e:
+            #     print(f"Error counting stars: {e}")
+
+            #
+            # Store structured results
+            #
+            resultsP.append({
+                "fov": fov,
+                "run": i,
+                "solution": solved_P,
+                "success": success_P,
+                "pipeline_ok": True,
+            }
+            )
+
+        #
+        # Aggregate FOV statistics
+        #
+        rateT = successes_T / runs if runs > 0 else 0.0
+        rateP = successes_P / runs if runs > 0 else 0.0
+        success_ratesT.append(rateT)
+        success_ratesP.append(rateP)
+        FPrateT.append(false_positives_T/knowns_T if knowns_T > 0 else 0.0)
+        FPrateP.append(false_positives_P/knowns_P if knowns_P > 0 else 0.0)
+        print("\n")
+        print("-" * 60)
+        print(f"FOV={fov} deg summary")
+        print(f"Tetra successes: {successes_T}/{runs}")
+        print(f"Tetra success rate: {rateT:.2%}")
+        print(f"Pyramid successes: {successes_P}/{runs}")
+        print(f"Pyramid success rate: {rateP:.2%}")
+        print(f"Tetra false positives: {false_positives_T}")
+        print(f"Pyramid false positives: {false_positives_P}")
+        print(f"Tetra knowns: {knowns_T}")
+        print(f"Pyramid knowns: {knowns_P}")
+
+        # if centroid_errors_P:
+        #     print(
+        #         f"average centroid error: "
+        #         f"{sum(centroid_errors_P)/len(centroid_errors_P):.4f} px"
+        #     )
+
+        # if detected_stars_list_P:
+        #     print(
+        #         f"average detected stars: "
+        #         f"{sum(detected_stars_list_P)/len(detected_stars_list_P):.2f}"
+        #     )
+
+        print("-" * 60)
+
+        #
+        # Placeholder values for plotting
+        #
+        # cross_boresight_accuracies.append(None)
+        # around_boresight_accuracies.append(None)
+
+    #
+    # FINAL STRUCTURED RESULTS
+    #
+    print("\n\n")
+    print("#" * 70)
+    print("FINAL RESULTS")
+    print("#" * 70)
+
+    for r in resultsP:
+        print(r)
+
+    #
+    # Plot success rate
+    #
+    plt.figure(figsize=(8, 5))
+
+    plt.plot(
+        fovs,
+        success_ratesT,
+        marker="o",
+        label="DQM Success Rate"
+    )
+    plt.plot(
+        fovs,
+        success_ratesP,
+        marker="o",
+        label= "Triad Success Rate"
+    )
+    plt.plot(
+        fovs,
+        FPrateT,
+        marker="x",
+        label="DQM False Positives Rate"
+    )
+    plt.plot(
+        fovs,
+        FPrateP,
+        marker="x",
+        label="Triad False Positives Rate"
+    )
+
+    plt.title("DQM vs Triad: Success Rate across FOV simple accuracy check")
+
+    plt.xlabel("FOV (degrees)")
+    plt.ylabel("Rate")
+
+    plt.ylim(-0.05, 1.05)
+
+    plt.grid(True)
+    plt.legend()
+
+    out_path = os.path.join(project_root, "dqmVStriad200.png")
+
+    plt.savefig(out_path, bbox_inches="tight")
+
+    print(f"\nSaved success-rate plot to: {out_path}")
+
+
 
 def test_ablation_study_fovs(runs_per_fov: str | int = 50):
     """Run an ablation study sweeping different FOVs and plot success rate.
@@ -463,7 +1343,7 @@ def test_ablation_study_fovs(runs_per_fov: str | int = 50):
     import re
 
     # FOV values to sweep (degrees)
-    fovs = [5, 10, 15, 20, 25, 30]
+    fovs = [5, 10, 15, 20, 25, 30, 35, 40, 45, 50, 55, 60, 65, 70, 75, 80, 85, 90]
 
     success_rates = []
     cross_boresight_accuracies = []
