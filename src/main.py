@@ -492,14 +492,16 @@ def test_TetraVsPyramid1(runs_per_fov: str | int = 100):
     simple_tolerance_degrees = 0.5  # Tolerance for simple accuracy check
     c_algo = "cog"
     a_algo = "dqm"
-    exposure_time = 0.6
+    exposure_time = 0.5
     fstars_count = 0
     success_ratesT = []
     FPrateT = []
     latencyT = []
+    earlyExitLatencyT = []
     success_ratesP = []
     FPrateP = []
     latencyP = []
+    earlyExitLatencyP = []
     # cross_boresight_accuracies = []
     # around_boresight_accuracies = []
 
@@ -560,7 +562,7 @@ def test_TetraVsPyramid1(runs_per_fov: str | int = 100):
         false_positives_T = 0
         centroid_errors_T = []
         detected_stars_list_T = []
-        successruntimes_T = 0
+        knownruntimes_T = 0
         failureruntimes_T = 0
 
         knowns_P = 0
@@ -568,7 +570,7 @@ def test_TetraVsPyramid1(runs_per_fov: str | int = 100):
         false_positives_P = 0
         centroid_errors_P = []
         detected_stars_list_P = []
-        successruntimes_P = 0
+        knownruntimes_P = 0
         failureruntimes_P = 0
 
         print("\n")
@@ -582,7 +584,8 @@ def test_TetraVsPyramid1(runs_per_fov: str | int = 100):
             print(f"STARTING RUN: FOV={fov} deg | run={i}")
             print("=" * 60)
 
-            attitude_fname = f"attitude_fov{fov}_run{i}.txt"
+            Tattitude_fname = f"attitude_Tfov{fov}_run{i}.txt"
+            Pattitude_fname = f"attitude_Pfov{fov}_run{i}.txt"
             centroid_fname = f"input_centroids_fov{fov}_run{i}.txt"
             actual_centroid_fname = f"actual_centroids_fov{fov}_run{i}.txt"
             compare_star_ids_fname = f"compare_star_ids_fov{fov}_run{i}.txt"
@@ -606,7 +609,7 @@ def test_TetraVsPyramid1(runs_per_fov: str | int = 100):
                 star_id_algo="tetra",
                 attitude_algo=a_algo,
                 centroid_mag_filter=0,
-                print_attitude=attitude_fname,
+                print_attitude=Tattitude_fname,
                 print_input_centroids=centroid_fname,
                 print_actual_centroids=actual_centroid_fname,
                 compare_star_ids=compare_star_ids_fname,
@@ -626,7 +629,7 @@ def test_TetraVsPyramid1(runs_per_fov: str | int = 100):
                 star_id_algo="py",
                 attitude_algo=a_algo,
                 centroid_mag_filter=0,
-                print_attitude=attitude_fname,
+                print_attitude=Pattitude_fname,
                 print_input_centroids=centroid_fname,
                 print_actual_centroids=actual_centroid_fname,
                 compare_star_ids=compare_star_ids_fname,
@@ -646,18 +649,16 @@ def test_TetraVsPyramid1(runs_per_fov: str | int = 100):
                     "success": False,
                     "pipeline_ok": False,
                 })
-                failureruntimes_T += (end_time_T - start_time_T)
 
-                continue
-            successruntimes_T += (end_time_T - start_time_T)
-            res_T = parse_attitude_result(attitude_fname)
+            res_T = parse_attitude_result(Tattitude_fname) if tetraOK else None
 
             solved_T = False
             success_T = False
             if res_T is None:
                 print(f"Could not parse attitude Tetra result for FOV={fov} run={i}")
-
+                failureruntimes_T += (end_time_T - start_time_T)
             elif res_T.known:
+                knownruntimes_T += (end_time_T - start_time_T)
                 solved_T = True
                 knowns_T += 1
                 if simple_accuracy_check(res_T, simple_tolerance_degrees, rra, rde, rroll):
@@ -665,6 +666,8 @@ def test_TetraVsPyramid1(runs_per_fov: str | int = 100):
                     successes_T += 1
                 else:
                     false_positives_T += 1
+            else:
+                failureruntimes_T += (end_time_T - start_time_T)
             print(f"SOLVED: {solved_T}")
             print(f"SUCCESS: {success_T}")
 
@@ -695,19 +698,16 @@ def test_TetraVsPyramid1(runs_per_fov: str | int = 100):
                     "success": False,
                     "pipeline_ok": False,
                 })
-
-                failureruntimes_P += (end_time_P - start_time_P)
-                continue
-            successruntimes_P += (end_time_P - start_time_P)
-            res_P = parse_attitude_result(attitude_fname)
+            res_P = parse_attitude_result(Pattitude_fname) if pyramidOK else None
 
             solved_P = False
             success_P = False
 
             if res_P is None:
                 print(f"Could not parse attitude Pyramid result for FOV={fov} run={i}")
-
+                failureruntimes_P += (end_time_P - start_time_P)
             elif res_P.known:
+                knownruntimes_P += (end_time_P - start_time_P)
                 solved_P = True
                 knowns_P += 1
                 if simple_accuracy_check(res_P, simple_tolerance_degrees, rra, rde, rroll):
@@ -715,6 +715,8 @@ def test_TetraVsPyramid1(runs_per_fov: str | int = 100):
                     successes_P += 1
                 else:
                     false_positives_P += 1
+            else: 
+                failureruntimes_P += (end_time_P - start_time_P)
             print(f"SOLVED: {solved_P}")
             print(f"SUCCESS: {success_P}")
 
@@ -801,6 +803,10 @@ def test_TetraVsPyramid1(runs_per_fov: str | int = 100):
         #
         # Aggregate FOV statistics
         #
+        latencyT.append(knownruntimes_T / knowns_T if knowns_T > 0 else 0.0)
+        earlyExitLatencyT.append(failureruntimes_T / (runs - knowns_T) if (runs - knowns_T) > 0 else 0.0)
+        latencyP.append(knownruntimes_P / knowns_P if knowns_P > 0 else 0.0)
+        earlyExitLatencyP.append(failureruntimes_P / (runs - knowns_P) if (runs - knowns_P) > 0 else 0.0)
         rateT = successes_T / runs if runs > 0 else 0.0
         rateP = successes_P / runs if runs > 0 else 0.0
         success_ratesT.append(rateT)
@@ -890,11 +896,56 @@ def test_TetraVsPyramid1(runs_per_fov: str | int = 100):
     plt.grid(True)
     plt.legend()
 
-    out_path = os.path.join(project_root, "tetravspyramidVERYLOWTOLERANCE.png")
+    out_path = os.path.join(project_root, "1026onekpaired.png")
 
     plt.savefig(out_path, bbox_inches="tight")
 
     print(f"\nSaved success-rate plot to: {out_path}")
+
+    plt.figure(figsize=(8, 5))
+    
+    plt.plot(
+        fovs,
+        latencyT,
+        marker="o",
+        label="Tetra Latency"
+    )
+    plt.plot(
+        fovs,
+        latencyP,
+        marker="o",
+        label="Pyramid Latency"
+    )
+    plt.plot(
+        fovs,
+        earlyExitLatencyT,
+        marker="x",
+        label="Tetra Unavailable Latency"
+    )
+    plt.plot(
+        fovs,
+        earlyExitLatencyP,
+        marker="x",
+        label="Pyramid Unavailable Latency"
+    )
+    
+    plt.title("Tetra vs Pyramid: Latency across FOV")
+    
+    plt.xlabel("FOV (degrees)")
+    plt.ylabel("Latency (seconds)")
+
+    plt.ylim(-0.05, 3.05)
+
+    plt.grid(True)
+    plt.legend()
+
+    out_path = os.path.join(project_root, "1026onekpaired_latency.png")
+    
+    plt.savefig(out_path, bbox_inches="tight")
+    
+    print(f"\nSaved latency plot to: {out_path}")
+
+
 
 def test_temp(runs_per_fov: str | int = 100):
     """Run a simple accuracy benchmark comparing Tetra vs Pyramid star-id algorithms across multiple FOVs.
@@ -1072,7 +1123,7 @@ def test_temp(runs_per_fov: str | int = 100):
 
                 continue
 
-            res_T = parse_attitude_result(attitude_fname)
+            res_T = parse_attitude_result(attitude_fname) if tetraOK else None
 
             solved_T = False
             success_T = False
@@ -1120,7 +1171,7 @@ def test_temp(runs_per_fov: str | int = 100):
 
                 continue
 
-            res_P = parse_attitude_result(attitude_fname)
+            res_P = parse_attitude_result(attitude_fname) if pyramidOK else None
 
             solved_P = False
             success_P = False
